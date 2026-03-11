@@ -1,0 +1,321 @@
+---
+title: "Mnemonic Similarity Task (MST)"
+output:
+  html_document: default
+  pdf_document: default
+date: "2026-03-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(stringr)
+```
+
+## Load Dataset
+```{r}
+data_path <- "MST_Data"
+
+task_files <- list.files(data_path,
+                         pattern = "_task_",
+                         recursive = TRUE,
+                         full.names = TRUE)
+
+test_files <- list.files(data_path,
+                         pattern = "_test_",
+                         recursive = TRUE,
+                         full.names = TRUE)
+
+task_conditions <- data.frame(file = task_files) %>%
+  mutate(
+    condition = case_when(
+      str_detect(file, "item_only") ~ "item_only",
+      str_detect(file, "task_only") ~ "task_only",
+      str_detect(file, "Both_item_task") ~ "Both_item_task"
+    )
+  )
+
+test_conditions <- data.frame(file = test_files) %>%
+  mutate(
+    condition = case_when(
+      str_detect(file, "item_only") ~ "item_only",
+      str_detect(file, "task_only") ~ "task_only",
+      str_detect(file, "Both_item_task") ~ "Both_item_task"
+    )
+  )
+
+table(task_conditions$condition)
+table(test_conditions$condition)
+```
+
+## Read and Combine All Participant Data
+```{r}
+read_task <- function(file){
+
+  df <- read_csv(file,
+                 show_col_types = FALSE,
+                 col_types = cols(.default = col_character()),
+                 name_repair = "minimal")
+
+  df$participant <- str_extract(basename(file), "^[0-9]+")
+
+  # Extract experimental condition
+  df$condition <- case_when(
+    str_detect(file, "item_only") ~ "item_only",
+    str_detect(file, "task_only") ~ "task_only",
+    str_detect(file, "Both_item_task") ~ "Both_item_task",
+    TRUE ~ NA_character_
+  )
+
+  if("key_resp_9.rt" %in% names(df))
+    df$key_resp_9.rt <- as.numeric(df$key_resp_9.rt)
+
+  if("key_resp_8.rt" %in% names(df))
+    df$key_resp_8.rt <- as.numeric(df$key_resp_8.rt)
+
+  return(df)
+}
+
+
+read_test <- function(file){
+
+  df <- read_csv(file, show_col_types = FALSE)
+
+  df$participant <- str_extract(basename(file), "^[0-9]+")
+
+  df$condition <- case_when(
+    str_detect(file, "item_only") ~ "item_only",
+    str_detect(file, "task_only") ~ "task_only",
+    str_detect(file, "Both_item_task") ~ "Both_item_task",
+    TRUE ~ NA_character_
+  )
+
+  return(df)
+}
+
+task_data <- bind_rows(lapply(task_files, read_task))
+test_data <- bind_rows(lapply(test_files, read_test))
+```
+
+## Clean Encoding Data
+```{r}
+encoding <- task_data %>%
+  select(participant,
+         condition,
+         image_path,
+         key_resp_9.rt,
+         key_resp_8.rt,
+         key_resp_9.keys,
+         key_resp_8.keys) %>%
+  mutate(
+    rt = case_when(
+      
+     !is.na(key_resp_9.rt) ~ key_resp_9.rt,
+     !is.na(key_resp_8.rt) ~ 3 + key_resp_8.rt,
+     TRUE ~ NA_real_
+)
+  )
+```
+
+## Identify Boundary Position (Post / Mid / Pre)
+```{r}
+
+encoding <- encoding %>%
+  group_by(participant) %>%
+  mutate(
+    trial = row_number(),
+    pos_in_event = ((trial - 1) %% 7) + 1,
+    boundary_type = case_when(
+      pos_in_event == 1 ~ "Post",
+      pos_in_event == 7 ~ "Pre",
+      TRUE ~ "Mid"
+    )
+  ) %>%
+  ungroup()
+```
+
+## Reaction Time Analysis
+```{r}
+rt_summary <- encoding %>%
+  group_by(condition, boundary_type) %>%
+  summarise(
+    mean_rt = mean(rt, na.rm = TRUE),
+    sd_rt = sd(rt, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  )
+
+rt_summary
+```
+
+## Plot Reaction Times
+```{r}
+ggplot(encoding, aes(x = boundary_type, y = rt)) +
+  geom_boxplot(aes(fill = boundary_type)) +
+  facet_wrap(~condition) +
+  labs(
+    title = "Reaction Time across Event Positions by Condition",
+    x = "Event Position",
+    y = "Reaction Time (seconds)"
+  ) +
+  theme_minimal()
+```
+
+## Reaction Time mean plot per condition
+```{r}
+rt_plot <- encoding %>%
+  group_by(condition, boundary_type) %>%
+  summarise(mean_rt = mean(rt, na.rm=TRUE), .groups="drop")
+
+ggplot(rt_plot, aes(x=boundary_type, y=mean_rt, fill=boundary_type)) +
+  geom_bar(stat="identity") +
+  facet_wrap(~condition) +
+  labs(
+    title="Mean Reaction Time by Condition",
+    x="Event Position",
+    y="Mean Reaction Time"
+  ) +
+  theme_minimal()
+```
+
+## Identify Stimulus Type (Test Phase)
+```{r}
+test_clean <- test_data %>%
+  select(participant, condition, image_path, key_resp_3.keys, key_resp_3.rt) %>%
+  mutate(
+    stimulus_type = case_when(
+      str_detect(image_path, regex("foil", ignore_case = TRUE)) ~ "foil",
+      str_detect(image_path, "b\\.jpg$") ~ "lure",
+      str_detect(image_path, "a\\.jpg$") ~ "target",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(stimulus_type))
+```
+
+## Response Distribution
+```{r}
+response_summary <- test_clean %>%
+  group_by(condition, stimulus_type, key_resp_3.keys) %>%
+  summarise(n = n(), .groups = "drop")
+
+response_summary
+```
+
+## Visualization – Response Counts
+```{r}
+ggplot(response_summary,
+       aes(x = stimulus_type, y = n, fill = key_resp_3.keys)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~condition) +
+  labs(
+    title = "Participant Responses by Stimulus Type and Condition",
+    x = "Stimulus Type",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
+## Response Accuracy
+```{r}
+test_clean <- test_clean %>%
+  mutate(
+    correct = case_when(
+      stimulus_type == "target" & key_resp_3.keys == "o" ~ 1,
+      stimulus_type == "foil" & key_resp_3.keys == "n" ~ 1,
+      stimulus_type == "lure" & key_resp_3.keys == "s" ~ 1,
+      TRUE ~ 0
+    )
+  )
+```
+
+## Accuracy Statistics
+```{r}
+accuracy_summary <- test_clean %>%
+  group_by(condition, stimulus_type) %>%
+  summarise(
+    accuracy = mean(correct, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  )
+
+accuracy_summary
+```
+
+## Visualization – Accuracy
+```{r}
+ggplot(accuracy_summary,
+       aes(x = stimulus_type, y = accuracy, fill = stimulus_type)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~condition) +
+  labs(
+    title = "Recognition Accuracy by Condition",
+    x = "Stimulus Type",
+    y = "Accuracy"
+  ) +
+  theme_minimal()
+```
+
+## Recognition Memory Index (REC)
+```{r}
+REC_summary <- test_clean %>%
+  group_by(condition) %>%
+  summarise(
+    p_old_target = mean(key_resp_3.keys[stimulus_type=="target"] == "o"),
+    p_old_foil = mean(key_resp_3.keys[stimulus_type=="foil"] == "o"),
+    REC = p_old_target - p_old_foil
+  )
+
+REC_summary
+```
+
+## Lure Discrimination Index (LDI)
+```{r}
+LDI_summary <- test_clean %>%
+  group_by(condition) %>%
+  summarise(
+    p_sim_lure = mean(key_resp_3.keys[stimulus_type=="lure"] == "s"),
+    p_sim_foil = mean(key_resp_3.keys[stimulus_type=="foil"] == "s"),
+    LDI = p_sim_lure - p_sim_foil
+  )
+
+LDI_summary
+```
+
+## REC/LDI visualization
+```{r}
+rec_ldi <- merge(REC_summary, LDI_summary, by="condition")
+
+rec_ldi_long <- rec_ldi %>%
+  tidyr::pivot_longer(cols=c(REC,LDI),
+                      names_to="metric",
+                      values_to="value")
+
+ggplot(rec_ldi_long,
+       aes(x=condition,y=value,fill=metric)) +
+  geom_bar(stat="identity",position="dodge") +
+  labs(
+    title="Recognition Memory Metrics by Condition",
+    x="Condition",
+    y="Score"
+  ) +
+  theme_minimal()
+```
+  
+## Inferential Test (t-test)
+```{r}
+encoding %>%
+  group_by(condition) %>%
+  summarise(
+    p_value = t.test(
+      rt[boundary_type == "Post"],
+      rt[boundary_type == "Mid"],
+      na.rm = TRUE
+    )$p.value
+  )
+```
